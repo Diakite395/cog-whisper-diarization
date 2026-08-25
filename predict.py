@@ -102,10 +102,8 @@ class Runner(BaseRunner):
             logger.info("Audio normalized in %.2fs", time.time() - normalize_start_time)
             logger.info("Audio duration: %.2fs", audio_duration)
 
-            segments, detected_num_speakers, detected_language = self.speech_to_text(
+            segments, detected_language = self.speech_to_text(
                 str(wav_path),
-                num_speakers,
-                prompt,
                 language,
                 translate=translate,
             )
@@ -113,7 +111,6 @@ class Runner(BaseRunner):
             return Output(
                 segments=segments,
                 language=detected_language,
-                num_speakers=detected_num_speakers,
             )
 
     def speech_to_text(
@@ -128,22 +125,18 @@ class Runner(BaseRunner):
         gpu_type = get_gpu_type()
         logger.info("GPU type: %s", gpu_type)
         logger.info("Starting transcription")
+
         options = {
             "language": language,
-            "beam_size": 5,
-            "vad_filter": True,
-            "vad_parameters": VadOptions(
-                max_speech_duration_s=self.model.feature_extractor.chunk_length,
-                min_speech_duration_ms=100,
-                speech_pad_ms=100,
-                threshold=0.25,
-                neg_threshold=0.2,
-            ),
-            "word_timestamps": True,
-            "initial_prompt": prompt,
-            "language_detection_segments": 1,
-            "task": "translate" if translate else "transcribe",
+            "beam_size": 2,
+            "word_timestamps":True,
+            "condition_on_previous_text": False,
+            "log_prob_threshold": -1.0,
+            "hallucination_silence_threshold": 2.0,
+            "no_speech_threshold": 0.6,
+            "no_repeat_ngram_size": 4,
         }
+
         segments, transcript_info = self.model.transcribe(audio_file_wav, **options)
         transcription = format_transcription_segments(list(segments))
         transcribe_end_time = time.time()
@@ -154,29 +147,7 @@ class Runner(BaseRunner):
             len(transcription),
         )
 
-        logger.info("Starting diarization")
-        waveform, sample_rate = torchaudio.load(audio_file_wav)
-        diarization = self.diarization_model(
-            {"waveform": waveform, "sample_rate": sample_rate},
-            num_speakers=num_speakers,
-        )
-        diarization_list = diarization.exclusive_speaker_diarization
-        diarize_end_time = time.time()
-        unique_speakers = {speaker for _, speaker in diarization_list}
-        logger.info(
-            "Diarization completed in %.2fs. Detected speakers: %s",
-            diarize_end_time - transcribe_end_time,
-            len(unique_speakers),
-        )
-
-        logger.info("Starting segment reconciliation")
-        final_segments = post_process_segments(transcription, diarization_list)
-        logger.info(
-            "Segment reconciliation completed in %.2fs. Final segments: %s",
-            time.time() - diarize_end_time,
-            len(final_segments),
-        )
-        return final_segments, len(unique_speakers), transcript_info.language
+        return segments, transcript_info.language
 
 
 def download_file(url: str, path: LocalPath) -> None:
@@ -250,7 +221,6 @@ def format_transcription_segments(segments: list[object]) -> list[dict[str, obje
             "avg_logprob": segment.avg_logprob,
             "start": float(segment.start),
             "end": float(segment.end),
-            "text": segment.text,
             "words": [],
         }
         if segment.words is not None:
@@ -268,89 +238,9 @@ def format_transcription_segments(segments: list[object]) -> list[dict[str, obje
 
 
 def post_process_segments(
-    segments: list[dict[str, object]], diarization_list: object
+    segments: list[dict[str, object]]
 ) -> list[dict[str, object]]:
-    diarize_segments = []
-    for turn, speaker in diarization_list:
-        diarize_segments.append({"start": turn.start, "end": turn.end, "speaker": speaker})
-
-    diarize_df = pd.DataFrame(diarize_segments)
-    final_segments = []
-    for segment in segments:
-        diarize_df["intersection"] = np.minimum(
-            diarize_df["end"], segment["end"]
-        ) - np.maximum(diarize_df["start"], segment["start"])
-        dia_tmp = diarize_df[diarize_df["intersection"] > 0]
-        speaker = "UNKNOWN"
-        if len(dia_tmp) > 0:
-            speaker = (
-                dia_tmp.groupby("speaker")["intersection"]
-                .sum()
-                .sort_values(ascending=False)
-                .index[0]
-            )
-
-        words_with_speakers = []
-        for word in segment["words"]:
-            diarize_df["intersection"] = np.minimum(
-                diarize_df["end"], word["end"]
-            ) - np.maximum(diarize_df["start"], word["start"])
-            dia_tmp = diarize_df[diarize_df["intersection"] > 0]
-            word_speaker = speaker
-            if len(dia_tmp) > 0:
-                word_speaker = (
-                    dia_tmp.groupby("speaker")["intersection"]
-                    .sum()
-                    .sort_values(ascending=False)
-                    .index[0]
-                )
-            word["speaker"] = word_speaker
-            words_with_speakers.append(word)
-
-        final_segments.append(
-            {
-                "start": segment["start"],
-                "end": segment["end"],
-                "text": segment["text"],
-                "speaker": speaker,
-                "avg_logprob": segment["avg_logprob"],
-                "words": words_with_speakers,
-            }
-        )
-
-    if len(final_segments) == 0:
-        return final_segments
-
-    grouped_segments = []
-    current_group = final_segments[0].copy()
-    sentence_end_pattern = r"[.!?]+"
-
-    for segment in final_segments[1:]:
-        time_gap = segment["start"] - current_group["end"]
-        current_duration = current_group["end"] - current_group["start"]
-        can_combine = (
-            segment["speaker"] == current_group["speaker"]
-            and time_gap <= 1.0
-            and current_duration < 30.0
-            and not re.search(sentence_end_pattern, current_group["text"][-1:])
-        )
-        if can_combine:
-            current_group["end"] = segment["end"]
-            current_group["text"] += " " + segment["text"]
-            current_group["words"].extend(segment["words"])
-            continue
-
-        grouped_segments.append(current_group)
-        current_group = segment.copy()
-
-    grouped_segments.append(current_group)
-
-    for segment in grouped_segments:
-        segment["text"] = re.sub(r"\s+", " ", segment["text"]).strip()
-        segment["text"] = re.sub(r"\s+([.,!?])", r"\1", segment["text"])
-        segment["duration"] = segment["end"] - segment["start"]
-
-    return grouped_segments
+    return 
 
 
 def get_gpu_type() -> str:

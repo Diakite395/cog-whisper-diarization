@@ -19,11 +19,6 @@ build:
 
   # commands run after the environment is setup
   run:
-    - mkdir -p /models/whisper /models/diarization
+    - mkdir -p /models/whisper
     - python -c "import faster_whisper; faster_whisper.download_model('large-v3-turbo', output_dir='/models/whisper/large-v3-turbo')"
-    - command: python -c "from huggingface_hub import snapshot_download; token=open('/run/secrets/HF_TOKEN').read().strip(); snapshot_download(repo_id='pyannote/speaker-diarization-community-1', local_dir='/models/diarization/pyannote--speaker-diarization-community-1', token=token)"
-      mounts:
-        - type: secret
-          id: HF_TOKEN
-          target: /run/secrets/HF_TOKEN
 run: "predict.py:Runner"

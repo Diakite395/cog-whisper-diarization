@@ -1,7 +1,4 @@
 torch==2.8.0
-requests
-pyannote-audio==4.0.4
-faster-whisper==1.2.1
-numpy
-pandas
 torchaudio==2.8.0
+faster-whisper==1.2.1
+requests

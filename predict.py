@@ -1,24 +1,17 @@
 import base64
 import logging
-import re
 import subprocess
 import tempfile
 import time
 from pathlib import Path as LocalPath
 from typing import Optional
 
-import numpy as np
-import pandas as pd
 import requests
-import torch
 import torchaudio
 from cog import BaseModel, BaseRunner, Input, Path
 from faster_whisper import WhisperModel
-from faster_whisper.vad import VadOptions
-from pyannote.audio import Pipeline
 
 WHISPER_MODEL_PATH = "/models/whisper/large-v3-turbo"
-DIARIZATION_MODEL_PATH = "/models/diarization/pyannote--speaker-diarization-community-1"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -27,7 +20,6 @@ logger = logging.getLogger(__name__)
 class Output(BaseModel):
     segments: list
     language: Optional[str] = None
-    num_speakers: Optional[int] = None
 
 
 class Runner(BaseRunner):
@@ -39,11 +31,6 @@ class Runner(BaseRunner):
             compute_type="float16",
         )
         logger.info("Whisper model loaded")
-        logger.info("Loading diarization model from %s", DIARIZATION_MODEL_PATH)
-        self.diarization_model = Pipeline.from_pretrained(DIARIZATION_MODEL_PATH).to(
-            torch.device("cuda")
-        )
-        logger.info("Diarization model loaded")
 
     def run(
         self,
@@ -54,12 +41,6 @@ class Runner(BaseRunner):
             description="Or provide: A direct audio file URL", default=None
         ),
         file: Optional[Path] = Input(description="Or an audio file", default=None),
-        num_speakers: Optional[int] = Input(
-            description="Number of speakers, leave empty to autodetect.",
-            ge=1,
-            le=50,
-            default=None,
-        ),
         translate: bool = Input(
             description="Translate the speech into English.",
             default=False,
@@ -104,7 +85,8 @@ class Runner(BaseRunner):
 
             segments, detected_language = self.speech_to_text(
                 str(wav_path),
-                language,
+                language=language,
+                prompt=prompt,
                 translate=translate,
             )
             logger.info("Run completed in %.2fs", time.time() - start_time)
@@ -116,11 +98,10 @@ class Runner(BaseRunner):
     def speech_to_text(
         self,
         audio_file_wav: str,
-        num_speakers: Optional[int] = None,
-        prompt: Optional[str] = None,
         language: Optional[str] = None,
+        prompt: Optional[str] = None,
         translate: bool = False,
-    ) -> tuple[list[dict[str, object]], int, str]:
+    ) -> tuple[list[dict[str, object]], str]:
         start_time = time.time()
         gpu_type = get_gpu_type()
         logger.info("GPU type: %s", gpu_type)
@@ -128,8 +109,10 @@ class Runner(BaseRunner):
 
         options = {
             "language": language,
+            "initial_prompt": prompt,
+            "task": "translate" if translate else "transcribe",
             "beam_size": 2,
-            "word_timestamps":True,
+            "word_timestamps": True,
             "condition_on_previous_text": False,
             "log_prob_threshold": -1.0,
             "hallucination_silence_threshold": 2.0,
@@ -147,7 +130,7 @@ class Runner(BaseRunner):
             len(transcription),
         )
 
-        return segments, transcript_info.language
+        return transcription, transcript_info.language
 
 
 def download_file(url: str, path: LocalPath) -> None:
@@ -221,6 +204,7 @@ def format_transcription_segments(segments: list[object]) -> list[dict[str, obje
             "avg_logprob": segment.avg_logprob,
             "start": float(segment.start),
             "end": float(segment.end),
+            "text": segment.text,
             "words": [],
         }
         if segment.words is not None:
@@ -235,12 +219,6 @@ def format_transcription_segments(segments: list[object]) -> list[dict[str, obje
             ]
         output_segments.append(output_segment)
     return output_segments
-
-
-def post_process_segments(
-    segments: list[dict[str, object]]
-) -> list[dict[str, object]]:
-    return 
 
 
 def get_gpu_type() -> str:

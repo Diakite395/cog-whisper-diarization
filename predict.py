@@ -41,10 +41,6 @@ class Runner(BaseRunner):
             description="Or provide: A direct audio file URL", default=None
         ),
         file: Optional[Path] = Input(description="Or an audio file", default=None),
-        translate: bool = Input(
-            description="Translate the speech into English.",
-            default=False,
-        ),
         language: Optional[str] = Input(
             description="Language of the spoken words as a language code like 'en'. Leave empty to auto detect language.",
             default=None,
@@ -87,7 +83,6 @@ class Runner(BaseRunner):
                 str(wav_path),
                 language=language,
                 prompt=prompt,
-                translate=translate,
             )
             logger.info("Run completed in %.2fs", time.time() - start_time)
             return Output(
@@ -100,7 +95,6 @@ class Runner(BaseRunner):
         audio_file_wav: str,
         language: Optional[str] = None,
         prompt: Optional[str] = None,
-        translate: bool = False,
     ) -> tuple[list[dict[str, object]], str]:
         start_time = time.time()
         gpu_type = get_gpu_type()
@@ -110,7 +104,6 @@ class Runner(BaseRunner):
         options = {
             "language": language,
             "initial_prompt": prompt,
-            "task": "translate" if translate else "transcribe",
             "beam_size": 2,
             "word_timestamps": True,
             "condition_on_previous_text": False,
@@ -204,7 +197,6 @@ def format_transcription_segments(segments: list[object]) -> list[dict[str, obje
             "avg_logprob": segment.avg_logprob,
             "start": float(segment.start),
             "end": float(segment.end),
-            "text": segment.text,
             "words": [],
         }
         if segment.words is not None:

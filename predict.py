@@ -11,6 +11,7 @@ import torchaudio
 from cog import BaseModel, BaseRunner, Input, Path
 from faster_whisper import WhisperModel
 
+
 WHISPER_MODEL_PATH = "/models/whisper/large-v3-turbo"
 
 logging.basicConfig(level=logging.INFO)
